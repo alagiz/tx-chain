@@ -10,7 +10,7 @@ import (
 var ParamStoreKeyMinSelfDelegation = []byte("minselfdelegation")
 
 // minMaxVotingPower is the lowest allowed max_voting_power.
-var minMaxVotingPower = sdkmath.LegacyNewDecWithPrec(1, 2)
+var minMaxVotingPower = sdkmath.LegacyNewDecWithPrec(5, 2)
 
 // StakingParamKeyTable returns the parameter key table.
 func StakingParamKeyTable() paramtypes.KeyTable {

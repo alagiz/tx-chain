@@ -22,8 +22,8 @@ func TestStakingParams_ValidateBasic_MaxVotingPower(t *testing.T) {
 	}{
 		{value: sdkmath.LegacyDec{}, valid: false},
 		{value: sdkmath.LegacyZeroDec(), valid: false},
-		{value: sdkmath.LegacyMustNewDecFromStr("0.0099"), valid: false},
-		{value: sdkmath.LegacyMustNewDecFromStr("0.01"), valid: true},
+		{value: sdkmath.LegacyMustNewDecFromStr("0.0499"), valid: false},
+		{value: sdkmath.LegacyMustNewDecFromStr("0.05"), valid: true},
 		{value: sdkmath.LegacyMustNewDecFromStr("0.1"), valid: true},
 		{value: sdkmath.LegacyOneDec(), valid: true},
 		{value: sdkmath.LegacyMustNewDecFromStr("1.01"), valid: false},

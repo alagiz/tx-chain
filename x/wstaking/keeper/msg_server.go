@@ -6,7 +6,6 @@ import (
 	sdkerrors "cosmossdk.io/errors"
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
 	wstakingtypes "github.com/tokenize-x/tx-chain/v8/x/wstaking/types"
@@ -143,7 +142,7 @@ func (s MsgServer) checkMaxVotingPower(goCtx context.Context, validatorAddress s
 	votingPower := sdkmath.LegacyNewDecFromInt(validator.Tokens).QuoInt(totalBonded)
 	if votingPower.GT(params.MaxVotingPower) {
 		return sdkerrors.Wrapf(
-			cosmoserrors.ErrInvalidRequest,
+			wstakingtypes.ErrMaxVotingPowerExceeded,
 			"validator voting power %s exceeds max voting power %s",
 			votingPower, params.MaxVotingPower,
 		)

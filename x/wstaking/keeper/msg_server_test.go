@@ -1,12 +1,15 @@
 package keeper_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	sdkmath "cosmossdk.io/math"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/authz"
 	stakingkeeper "github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/stretchr/testify/require"
@@ -14,6 +17,7 @@ import (
 	"github.com/tokenize-x/tx-chain/v8/testutil/simapp"
 	customparamstypes "github.com/tokenize-x/tx-chain/v8/x/customparams/types"
 	"github.com/tokenize-x/tx-chain/v8/x/wstaking/keeper"
+	wstakingtypes "github.com/tokenize-x/tx-chain/v8/x/wstaking/types"
 )
 
 func Test_WrappedMsgCreateValidatorHandler(t *testing.T) {
@@ -158,6 +162,29 @@ func Test_MaxVotingPower(t *testing.T) {
 		})
 		return err
 	}
+	undelegate := func(ctx sdk.Context, amount sdkmath.Int) error {
+		_, err := msgServer.Undelegate(ctx, &stakingtypes.MsgUndelegate{
+			DelegatorAddress: operatorA.String(),
+			ValidatorAddress: valA.String(),
+			Amount:           coin(amount),
+		})
+		if err != nil {
+			return err
+		}
+		// the undelegation pushed G from 2d / 3d to 2d / 2.5d, over the cap
+		validator, err := stakingKeeper.GetValidator(ctx, valG)
+		if err != nil {
+			return err
+		}
+		totalBonded, err := stakingKeeper.TotalBondedTokens(ctx)
+		if err != nil {
+			return err
+		}
+		if sdkmath.LegacyNewDecFromInt(validator.Tokens).QuoInt(totalBonded).LTE(sdkmath.LegacyMustNewDecFromStr("0.7")) {
+			return errors.New("validator G is not over the cap")
+		}
+		return nil
+	}
 	createValidator := func(ctx sdk.Context, amount sdkmath.Int) error {
 		_, err := msgServer.CreateValidator(ctx, &stakingtypes.MsgCreateValidator{
 			Description: stakingtypes.Description{Moniker: "C"},
@@ -215,6 +242,10 @@ func Test_MaxVotingPower(t *testing.T) {
 		{"cancel unbonding over cap", "0.6", func(ctx sdk.Context) error {
 			return cancelUnbonding(ctx, d.QuoRaw(2).AddRaw(1))
 		}, false},
+		// undelegating is never capped, even when it pushes another validator over the cap
+		{"undelegate pushing another validator over cap", "0.7", func(ctx sdk.Context) error {
+			return undelegate(ctx, d.QuoRaw(2))
+		}, true},
 		// C is not bonded yet, it is measured as if bonded: c / (3d + c) <= 0.5 while c <= 3d
 		{"create validator up to cap", "0.5", func(ctx sdk.Context) error { return createValidator(ctx, d.MulRaw(3)) }, true},
 		{"create validator over cap", "0.5", func(ctx sdk.Context) error {
@@ -251,52 +282,64 @@ func Test_MaxVotingPower(t *testing.T) {
 			if tc.allowed {
 				require.NoError(t, err)
 			} else {
-				require.ErrorContains(t, err, "exceeds max voting power")
+				require.ErrorIs(t, err, wstakingtypes.ErrMaxVotingPowerExceeded)
 			}
 		})
 	}
 }
 
 func Test_MaxVotingPower_TxReverted(t *testing.T) {
-	requireT := require.New(t)
-	simApp := simapp.New()
-	ctx := simApp.NewContext(false)
+	for _, viaAuthz := range []bool{false, true} {
+		t.Run(fmt.Sprintf("authz=%t", viaAuthz), func(t *testing.T) {
+			requireT := require.New(t)
+			simApp := simapp.New()
+			ctx := simApp.NewContext(false)
 
-	params := customparamstypes.DefaultStakingParams()
-	params.MaxVotingPower = sdkmath.LegacyMustNewDecFromStr("0.5")
-	requireT.NoError(simApp.CustomParamsKeeper.SetStakingParams(ctx, params))
+			params := customparamstypes.DefaultStakingParams()
+			params.MaxVotingPower = sdkmath.LegacyMustNewDecFromStr("0.5")
+			requireT.NoError(simApp.CustomParamsKeeper.SetStakingParams(ctx, params))
 
-	validators, err := simApp.StakingKeeper.GetBondedValidatorsByPower(ctx)
-	requireT.NoError(err)
-	requireT.Len(validators, 1)
-	valAddr := validators[0].GetOperator()
-	tokensBefore := validators[0].Tokens
+			validators, err := simApp.StakingKeeper.GetBondedValidatorsByPower(ctx)
+			requireT.NoError(err)
+			requireT.Len(validators, 1)
+			valAddr := validators[0].GetOperator()
+			tokensBefore := validators[0].Tokens
 
-	bondDenom, err := simApp.StakingKeeper.BondDenom(ctx)
-	requireT.NoError(err)
-	delegator, privateKey := simApp.GenAccount(ctx)
-	requireT.NoError(simApp.FundAccount(
-		ctx, delegator, sdk.NewCoins(sdk.NewCoin(bondDenom, sdkmath.NewInt(100_000_000_000))),
-	))
-	requireT.NoError(simApp.FinalizeBlock())
+			bondDenom, err := simApp.StakingKeeper.BondDenom(ctx)
+			requireT.NoError(err)
+			delegator, delegatorKey := simApp.GenAccount(ctx)
+			requireT.NoError(simApp.FundAccount(
+				ctx, delegator, sdk.NewCoins(sdk.NewCoin(bondDenom, sdkmath.NewInt(100_000_000_000))),
+			))
+			grantee, granteeKey := simApp.GenAccount(ctx)
+			requireT.NoError(simApp.FundAccount(ctx, grantee, sdk.NewCoins(sdk.NewCoin(bondDenom, sdkmath.NewInt(1_000_000)))))
+			requireT.NoError(simApp.AuthzKeeper.SaveGrant(
+				ctx, grantee, delegator, authz.NewGenericAuthorization(sdk.MsgTypeURL(&stakingtypes.MsgDelegate{})), nil,
+			))
+			requireT.NoError(simApp.FinalizeBlock())
 
-	// the only bonded validator holds 100%, so any delegation to it exceeds the cap
-	_, _, err = simApp.SendTx(
-		ctx,
-		sdk.NewCoin(bondDenom, sdkmath.NewInt(1_000_000)),
-		300_000,
-		privateKey,
-		&stakingtypes.MsgDelegate{
-			DelegatorAddress: delegator.String(),
-			ValidatorAddress: valAddr,
-			Amount:           sdk.NewCoin(bondDenom, sdkmath.NewInt(1_000)),
-		},
-	)
-	requireT.ErrorContains(err, "exceeds max voting power")
-	requireT.NoError(simApp.FinalizeBlock())
+			// the only bonded validator holds 100%, so any delegation to it exceeds the cap
+			var msg sdk.Msg = &stakingtypes.MsgDelegate{
+				DelegatorAddress: delegator.String(),
+				ValidatorAddress: valAddr,
+				Amount:           sdk.NewCoin(bondDenom, sdkmath.NewInt(1_000)),
+			}
+			signerKey := delegatorKey
+			if viaAuthz {
+				execMsg := authz.NewMsgExec(grantee, []sdk.Msg{msg})
+				msg = &execMsg
+				signerKey = granteeKey
+			}
+			_, _, err = simApp.SendTx(ctx, sdk.NewCoin(bondDenom, sdkmath.NewInt(1_000_000)), 500_000, signerKey, msg)
+			requireT.ErrorIs(err, wstakingtypes.ErrMaxVotingPowerExceeded)
+			requireT.NoError(simApp.FinalizeBlock())
 
-	ctx = simApp.NewContext(false)
-	validator, err := simApp.StakingKeeper.GetValidator(ctx, sdk.MustValAddressFromBech32(valAddr))
-	requireT.NoError(err)
-	requireT.Equal(tokensBefore.String(), validator.Tokens.String())
+			ctx = simApp.NewContext(false)
+			validator, err := simApp.StakingKeeper.GetValidator(ctx, sdk.MustValAddressFromBech32(valAddr))
+			requireT.NoError(err)
+			requireT.Equal(tokensBefore.String(), validator.Tokens.String())
+			_, err = simApp.StakingKeeper.GetDelegation(ctx, delegator, sdk.MustValAddressFromBech32(valAddr))
+			requireT.ErrorIs(err, stakingtypes.ErrNoDelegation)
+		})
+	}
 }
